@@ -1,0 +1,152 @@
+# ============================================================================
+# SmartShop v2.0 — Docker Compose 部署
+# ============================================================================
+# 启动:  docker compose up -d
+# 停止:  docker compose down
+# 日志:  docker compose logs -f
+# 前端:  http://localhost:8502
+# ============================================================================
+
+services:
+  # ------------------------------------------------------------------
+  # MySQL 8.0 数据库
+  # ------------------------------------------------------------------
+  mysql:
+    image: mysql:8.0
+    container_name: shop-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-smartshop123}
+      MYSQL_DATABASE: smartshop
+    ports:
+      - "3306:3306"
+    volumes:
+      - ./sql/init_shop.sql:/docker-entrypoint-initdb.d/init.sql
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD:-smartshop123}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - shop-network
+
+  # ------------------------------------------------------------------
+  # 商品 MCP Server (FastMCP + SSE)
+  # ------------------------------------------------------------------
+  product-mcp:
+    build: .
+    container_name: shop-product-mcp
+    restart: unless-stopped
+    command: python -m uvicorn mcp_servers.mcp_product_server:app --host 0.0.0.0 --port 8100
+    ports:
+      - "8100:8100"
+    environment:
+      - MYSQL_HOST=mysql
+      - MYSQL_PORT=3306
+      - MYSQL_USER=root
+      - MYSQL_PASSWORD=${MYSQL_ROOT_PASSWORD:-smartshop123}
+      - MYSQL_DATABASE=smartshop
+      - LLM_API_KEY=${LLM_API_KEY}
+    depends_on:
+      mysql:
+        condition: service_healthy
+    networks:
+      - shop-network
+
+  # ------------------------------------------------------------------
+  # 订单 MCP Server (FastMCP + SSE)
+  # ------------------------------------------------------------------
+  order-mcp:
+    build: .
+    container_name: shop-order-mcp
+    restart: unless-stopped
+    command: python -m uvicorn mcp_servers.mcp_order_server:app --host 0.0.0.0 --port 8101
+    ports:
+      - "8101:8101"
+    environment:
+      - MYSQL_HOST=mysql
+      - MYSQL_PORT=3306
+      - MYSQL_USER=root
+      - MYSQL_PASSWORD=${MYSQL_ROOT_PASSWORD:-smartshop123}
+      - MYSQL_DATABASE=smartshop
+      - LLM_API_KEY=${LLM_API_KEY}
+    depends_on:
+      mysql:
+        condition: service_healthy
+    networks:
+      - shop-network
+
+  # ------------------------------------------------------------------
+  # A2A Router Server (FastAPI + LangGraph 编排)
+  # ------------------------------------------------------------------
+  a2a-router:
+    build: .
+    container_name: shop-a2a-router
+    restart: unless-stopped
+    command: python -m uvicorn core.router_A2Aagent_Server:app --host 0.0.0.0 --port 8008
+    ports:
+      - "8008:8008"
+    environment:
+      - MYSQL_HOST=mysql
+      - MYSQL_PORT=3306
+      - MYSQL_USER=root
+      - MYSQL_PASSWORD=${MYSQL_ROOT_PASSWORD:-smartshop123}
+      - MYSQL_DATABASE=smartshop
+      - MCP_PRODUCT_URL=http://product-mcp:8100
+      - MCP_ORDER_URL=http://order-mcp:8101
+      - LLM_API_KEY=${LLM_API_KEY}
+    depends_on:
+      - product-mcp
+      - order-mcp
+    networks:
+      - shop-network
+
+  # ------------------------------------------------------------------
+  # 数据初始化（一次性任务）
+  # ------------------------------------------------------------------
+  init-data:
+    build: .
+    container_name: shop-init-data
+    command: >
+      sh -c "
+      python data/product_mock.py &&
+      python data/order_mock.py
+      "
+    environment:
+      - MYSQL_HOST=mysql
+      - MYSQL_PASSWORD=${MYSQL_ROOT_PASSWORD:-smartshop123}
+    depends_on:
+      mysql:
+        condition: service_healthy
+    networks:
+      - shop-network
+    profiles:
+      - init  # 仅通过 `docker compose --profile init up init-data` 运行
+
+  # ------------------------------------------------------------------
+  # Streamlit 前端
+  # ------------------------------------------------------------------
+  streamlit:
+    build: .
+    container_name: shop-streamlit
+    restart: unless-stopped
+    command: streamlit run main.py --server.port 8502 --server.address 0.0.0.0
+    ports:
+      - "8502:8502"
+    environment:
+      - A2A_ROUTER_URL=http://a2a-router:8008
+      - LLM_API_KEY=${LLM_API_KEY}
+    depends_on:
+      - a2a-router
+    networks:
+      - shop-network
+
+volumes:
+  mysql_data:
+    driver: local
+
+networks:
+  shop-network:
+    driver: bridge

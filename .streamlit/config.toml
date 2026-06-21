@@ -1,0 +1,9 @@
+[server]
+# SmartShop 专用端口，避免与本地其他 Streamlit 项目冲突
+port = 8502
+# 允许局域网访问（可选）
+# headless = true
+
+[browser]
+# 启动时自动打开浏览器
+gatherUsageStats = false
